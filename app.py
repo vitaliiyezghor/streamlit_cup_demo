@@ -10,7 +10,7 @@ import streamlit as st
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 #from helper import load_model
 import os
-from turn import get_ice_servers
+#from turn import get_ice_servers
 #from ultralytics import YOLO
 #import torch
 
