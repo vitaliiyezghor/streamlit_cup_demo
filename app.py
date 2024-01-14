@@ -1,110 +1,145 @@
-# Python In-built packages
+import logging
+import queue
 from pathlib import Path
-import PIL
+from typing import List, NamedTuple
 
-# External packages
+import av
+import cv2
+import numpy as np
 import streamlit as st
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
+#from helper import load_model
+import os
+from turn import get_ice_servers
+#from ultralytics import YOLO
+#import torch
 
-# Local Modules
-import settings
-import helper
+#st.write(f"CUDA {torch.cuda.is_available()}")
 
-# Setting page layout
-st.set_page_config(
-    page_title="Object Detection using YOLOv8",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
+HERE = Path(__file__).parent
+ROOT = HERE.parent
+
+logger = logging.getLogger(__name__)
+
+
+MODEL_URL = "https://github.com/robmarkcole/object-detection-app/raw/master/model/MobileNetSSD_deploy.caffemodel"  # noqa: E501
+MODEL_LOCAL_PATH = ROOT / "./models/MobileNetSSD_deploy.caffemodel"
+PROTOTXT_URL = "https://github.com/robmarkcole/object-detection-app/raw/master/model/MobileNetSSD_deploy.prototxt.txt"  # noqa: E501
+PROTOTXT_LOCAL_PATH = ROOT / "./models/MobileNetSSD_deploy.prototxt.txt"
+
+weights_dir = "weights"
+yolov8_nano_path = os.path.join(weights_dir, "yolov8n.pt")
+
+CLASSES = ["person"]
+
+
+class Detection(NamedTuple):
+    class_id: int
+    label: str
+    score: float
+    box: np.ndarray
+
+
+@st.cache_resource  # type: ignore
+def generate_label_colors():
+    return np.random.uniform(0, 255, size=(len(CLASSES), 3))
+
+
+COLORS = generate_label_colors()
+
+
+# Session-specific caching
+'''
+cache_key = "object_detection"
+if cache_key in st.session_state:
+    model = st.session_state[cache_key]
+    print("model", type(model))
+else:
+    print("="*10)
+    #model = load_model(yolov8_nano_path)
+    model = YOLO("yolov8n.pt")
+    st.session_state[cache_key] = model
+    print(type(st.session_state[cache_key]))
+'''
+score_threshold = st.slider("Score threshold", 0.0, 1.0, 0.5, 0.05)
+
+# NOTE: The callback will be called in another thread,
+#       so use a queue here for thread-safety to pass the data
+#       from inside to outside the callback.
+# TODO: A general-purpose shared state object may be more useful.
+result_queue: "queue.Queue[List[Detection]]" = queue.Queue()
+
+
+def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
+    image = frame.to_ndarray(format="bgr24")
+
+    '''
+    results = model(image)
+    annotated_frame = results[0].plot()
+    image = annotated_frame
+    print("image", image.shape)
+
+    
+    detections = [
+        Detection(
+            class_id=int(detection[1]),
+            label=CLASSES[int(detection[1])],
+            score=float(detection[2]),
+            box=(detection[3:7] * np.array([w, h, w, h])),
+        )
+        for detection in output
+    ]
+
+    # Render bounding boxes and captions
+    for detection in detections:
+        caption = f"{detection.label}: {round(detection.score * 100, 2)}%"
+        color = COLORS[detection.class_id]
+        xmin, ymin, xmax, ymax = detection.box.astype("int")
+
+        cv2.rectangle(image, (xmin, ymin), (xmax, ymax), color, 2)
+        cv2.putText(
+            image,
+            caption,
+            (xmin, ymin - 15 if ymin - 15 > 15 else ymin + 15),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            2,
+        )
+    
+    result_queue.put(detections)
+    ''' 
+    result_queue.put(["person", "vehicle"])
+
+    return av.VideoFrame.from_ndarray(image, format="bgr24")
+
+
+webrtc_ctx = webrtc_streamer(
+    key="object-detection",
+    mode=WebRtcMode.SENDRECV,
+    #rtc_configuration=get_ice_servers(),
+    rtc_configuration={
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    },
+    video_frame_callback=video_frame_callback,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
 )
 
-# Main page heading
-st.title("Object Detection using YOLOv8")
+if st.checkbox("Show the detected labels", value=True):
+    if webrtc_ctx.state.playing:
+        labels_placeholder = st.empty()
+        # NOTE: The video transformation with object detection and
+        # this loop displaying the result labels are running
+        # in different threads asynchronously.
+        # Then the rendered video frames and the labels displayed here
+        # are not strictly synchronized.
+        while True:
+            result = result_queue.get()
+            labels_placeholder.table(result)
 
-# Sidebar
-st.sidebar.header("ML Model Config")
-
-# Model Options
-model_type = st.sidebar.radio(
-    "Select Task", ['Detection', 'Segmentation'])
-
-confidence = float(st.sidebar.slider(
-    "Select Model Confidence", 25, 100, 40)) / 100
-
-# Selecting Detection Or Segmentation
-if model_type == 'Detection':
-    model_path = Path(settings.DETECTION_MODEL)
-elif model_type == 'Segmentation':
-    model_path = Path(settings.SEGMENTATION_MODEL)
-
-# Load Pre-trained ML Model
-try:
-    model = helper.load_model(model_path)
-except Exception as ex:
-    st.error(f"Unable to load model. Check the specified path: {model_path}")
-    st.error(ex)
-
-st.sidebar.header("Image/Video Config")
-source_radio = st.sidebar.radio(
-    "Select Source", settings.SOURCES_LIST)
-
-source_img = None
-# If image is selected
-if source_radio == settings.IMAGE:
-    source_img = st.sidebar.file_uploader(
-        "Choose an image...", type=("jpg", "jpeg", "png", 'bmp', 'webp'))
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        try:
-            if source_img is None:
-                default_image_path = str(settings.DEFAULT_IMAGE)
-                default_image = PIL.Image.open(default_image_path)
-                st.image(default_image_path, caption="Default Image",
-                         use_column_width=True)
-            else:
-                uploaded_image = PIL.Image.open(source_img)
-                st.image(source_img, caption="Uploaded Image",
-                         use_column_width=True)
-        except Exception as ex:
-            st.error("Error occurred while opening the image.")
-            st.error(ex)
-
-    with col2:
-        if source_img is None:
-            default_detected_image_path = str(settings.DEFAULT_DETECT_IMAGE)
-            default_detected_image = PIL.Image.open(
-                default_detected_image_path)
-            st.image(default_detected_image_path, caption='Detected Image',
-                     use_column_width=True)
-        else:
-            if st.sidebar.button('Detect Objects'):
-                res = model.predict(uploaded_image,
-                                    conf=confidence
-                                    )
-                boxes = res[0].boxes
-                res_plotted = res[0].plot()[:, :, ::-1]
-                st.image(res_plotted, caption='Detected Image',
-                         use_column_width=True)
-                try:
-                    with st.expander("Detection Results"):
-                        for box in boxes:
-                            st.write(box.data)
-                except Exception as ex:
-                    # st.write(ex)
-                    st.write("No image is uploaded yet!")
-
-elif source_radio == settings.VIDEO:
-    helper.play_stored_video(confidence, model)
-
-elif source_radio == settings.WEBCAM:
-    helper.play_webcam(confidence, model)
-
-elif source_radio == settings.RTSP:
-    helper.play_rtsp_stream(confidence, model)
-
-elif source_radio == settings.YOUTUBE:
-    helper.play_youtube_video(confidence, model)
-
-else:
-    st.error("Please select a valid source type!")
+st.markdown(
+    "This demo uses a model and code from "
+    "https://github.com/robmarkcole/object-detection-app. "
+    "Many thanks to the project."
+)
